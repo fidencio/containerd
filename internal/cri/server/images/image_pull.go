@@ -43,7 +43,6 @@ import (
 	containerdimages "github.com/containerd/containerd/v2/core/images"
 	"github.com/containerd/containerd/v2/core/remotes/docker"
 	"github.com/containerd/containerd/v2/core/remotes/docker/config"
-	"github.com/containerd/containerd/v2/internal/cri/annotations"
 	criconfig "github.com/containerd/containerd/v2/internal/cri/config"
 	crilabels "github.com/containerd/containerd/v2/internal/cri/labels"
 	snpkg "github.com/containerd/containerd/v2/pkg/snapshotters"
@@ -165,7 +164,7 @@ func (c *CRIImageService) PullImage(ctx context.Context, name string, credential
 	)
 
 	defer pcancel()
-	snapshotter, err := c.snapshotterFromPodSandboxConfig(ctx, ref, sandboxConfig)
+	snapshotter, err := c.snapshotterFromPodSandboxConfig(ctx, ref, sandboxConfig, runtimeHandler)
 	if err != nil {
 		return "", err
 	}
@@ -774,16 +773,9 @@ func (rt *pullRequestReporterRoundTripper) RoundTrip(req *http.Request) (*http.R
 // Once we know the runtime, try to override default snapshotter if it is set for this runtime.
 // See https://github.com/containerd/containerd/issues/6657
 func (c *CRIImageService) snapshotterFromPodSandboxConfig(ctx context.Context, imageRef string,
-	s *runtime.PodSandboxConfig) (string, error) {
+	s *runtime.PodSandboxConfig, runtimeHandler string) (string, error) {
 	snapshotter := c.config.Snapshotter
-	if s == nil || s.Annotations == nil {
-		return snapshotter, nil
-	}
-
-	// TODO(kiashok): honor the new CRI runtime handler field added to v0.29.0
-	// for image pull per runtime class support.
-	runtimeHandler, ok := s.Annotations[annotations.RuntimeHandler]
-	if !ok {
+	if s == nil {
 		return snapshotter, nil
 	}
 
