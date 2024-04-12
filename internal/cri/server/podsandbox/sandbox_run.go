@@ -75,9 +75,16 @@ func (c *Controller) Start(ctx context.Context, id string) (cin sandbox.Controll
 		labels = map[string]string{}
 	)
 
+	ociRuntime, err := c.config.GetSandboxRuntime(config, metadata.RuntimeHandler)
+	if err != nil {
+		return cin, fmt.Errorf("failed to get sandbox runtime: %w", err)
+	}
+	log.G(ctx).WithField("podsandboxid", id).Debugf("use OCI runtime %+v", ociRuntime)
+
+	snapshotter := c.imageService.RuntimeSnapshotter(ctx, ociRuntime)
 	sandboxImage := c.getSandboxImageName()
 	// Ensure sandbox container image snapshot.
-	image, err := c.ensureImageExists(ctx, sandboxImage, config, metadata.RuntimeHandler)
+	image, err := c.ensureImageExists(ctx, sandboxImage, config, metadata.RuntimeHandler, snapshotter)
 	if err != nil {
 		return cin, fmt.Errorf("failed to get sandbox image %q: %w", sandboxImage, err)
 	}
@@ -86,12 +93,6 @@ func (c *Controller) Start(ctx context.Context, id string) (cin sandbox.Controll
 	if err != nil {
 		return cin, fmt.Errorf("failed to get image from containerd %q: %w", image.ID, err)
 	}
-
-	ociRuntime, err := c.config.GetSandboxRuntime(config, metadata.RuntimeHandler)
-	if err != nil {
-		return cin, fmt.Errorf("failed to get sandbox runtime: %w", err)
-	}
-	log.G(ctx).WithField("podsandboxid", id).Debugf("use OCI runtime %+v", ociRuntime)
 
 	labels["oci_runtime_type"] = ociRuntime.Type
 
@@ -140,7 +141,7 @@ func (c *Controller) Start(ctx context.Context, id string) (cin sandbox.Controll
 	snapshotterOpt = append(snapshotterOpt, extraSOpts...)
 
 	opts := []containerd.NewContainerOpts{
-		containerd.WithSnapshotter(c.imageService.RuntimeSnapshotter(ctx, ociRuntime)),
+		containerd.WithSnapshotter(snapshotter),
 		customopts.WithNewSnapshot(id, containerdImage, snapshotterOpt...),
 		containerd.WithSpec(spec, specOpts...),
 		containerd.WithContainerLabels(sandboxLabels),
@@ -297,13 +298,17 @@ func (c *Controller) Create(_ctx context.Context, info sandbox.Sandbox, opts ...
 	return c.store.Save(podSandbox)
 }
 
-func (c *Controller) ensureImageExists(ctx context.Context, ref string, config *runtime.PodSandboxConfig, runtimeHandler string) (*imagestore.Image, error) {
+func (c *Controller) ensureImageExists(ctx context.Context, ref string, config *runtime.PodSandboxConfig, runtimeHandler string, snapshotter string) (*imagestore.Image, error) {
 	image, err := c.imageService.LocalResolve(ref)
 	if err != nil && !errdefs.IsNotFound(err) {
 		return nil, fmt.Errorf("failed to get image %q: %w", ref, err)
 	}
 	if err == nil {
-		return &image, nil
+		// At this point we know the image exists, but we still don't know whether the
+		// image belongs to the snapshotter being used by the specific runtimeHundler.
+		if _, ok := image.Snapshotters[snapshotter]; ok {
+			return &image, nil
+		}
 	}
 	// Pull image to ensure the image exists
 	// TODO: Cleaner interface
