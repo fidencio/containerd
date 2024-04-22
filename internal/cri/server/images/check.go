@@ -56,6 +56,8 @@ func (c *CRIImageService) getSupportedSnapshotsForPlatform(platform string) []st
 // be used for CRI. It may try to recover images which are not ready
 // but will only log errors, not return any.
 func (c *CRIImageService) CheckImages(ctx context.Context) error {
+	log.G(ctx).Error("FIDENCIO | CheckImages")
+
 	// TODO: Move way from `client.ListImages` to directly using image store
 	cImages, err := c.client.ListImages(ctx)
 	if err != nil {
@@ -66,11 +68,14 @@ func (c *CRIImageService) CheckImages(ctx context.Context) error {
 	for _, i := range cImages {
 		wg.Add(1)
 		i := i
+		log.G(ctx).Errorf("FIDENCIO | CheckImages | image: %v", i.Name())
 		// Get list of platform labels this image
 		imagePlatforms := getPlatformsFromImageLabel(i.Labels())
 		go func(imagePlatforms []string) {
 			defer wg.Done()
 			for _, imgPlatform := range imagePlatforms {
+				log.G(ctx).Errorf("FIDENCIO | CheckImages | image: %v | imgPlatform: %v", i.Name(), imgPlatform)
+
 				// unpackedForSnapshotter gives list of snapshotters that
 				// this image was successfully unpacked for.
 				var unpackedForSnapshotter []string
@@ -78,12 +83,15 @@ func (c *CRIImageService) CheckImages(ctx context.Context) error {
 				// Support all snapshotters that can be used with this platform
 				snapshotters := c.getSupportedSnapshotsForPlatform(imgPlatform)
 				for _, snapshotter := range snapshotters {
+					log.G(ctx).Errorf("FIDENCIO | CheckImages | image: %v | imgPlatform: %v | snapshotter: %v", i.Name(), imgPlatform, snapshotter)
 					ok, _, _, _, err := images.Check(ctx, i.ContentStore(), i.Target(), platforms.Only(platforms.MustParse(imgPlatform)))
 					if err != nil {
+						log.G(ctx).Errorf("FIDENCIO | CheckImages | image: %v | imgPlatform: %v | snapshotter: %v | Failed to check image content readiness", i.Name(), imgPlatform, snapshotter)
 						log.G(ctx).WithError(err).Errorf("Failed to check image content readiness for %q", i.Name())
 						return
 					}
 					if !ok {
+						log.G(ctx).Errorf("FIDENCIO | CheckImages | image: %v | imgPlatform: %v | snapshotter: %v | Image content readiness is NOT OK", i.Name(), imgPlatform, snapshotter)
 						log.G(ctx).Warnf("The image content readiness for %q is not ok", i.Name())
 						// content for this platform matcher was not found. Therefore, remove the image platform
 						// label and continue unpacking later images
@@ -93,16 +101,19 @@ func (c *CRIImageService) CheckImages(ctx context.Context) error {
 					// TODO: This logic should be done elsewhere and owned by the image service
 					unpacked, err := i.IsUnpacked(ctx, snapshotter)
 					if err != nil {
+						log.G(ctx).Errorf("FIDENCIO | CheckImages | image: %v | imgPlatform: %v | snapshotter: %v | Failed to check whether image is unpacked", i.Name(), imgPlatform, snapshotter)
 						log.G(ctx).WithError(err).Warnf("Failed to check whether image is unpacked for image %s", i.Name())
 						return
 					}
 					if !unpacked {
+						log.G(ctx).Errorf("FIDENCIO | CheckImages | image: %v | imgPlatform: %v | snapshotter: %v | Image is NOT unpacked", i.Name(), imgPlatform, snapshotter)
 						log.G(ctx).Warnf("The image %s is not unpacked.", i.Name())
 						// continue and try to unpack with other snapshotters
 						continue
 					}
 					// This image was successfully unpacked for a snapshotter.
 					unpackedForSnapshotter = append(unpackedForSnapshotter, snapshotter)
+					log.G(ctx).Errorf("FIDENCIO | CheckImages | image: %v | imgPlatform: %v | snapshotter: %v | Image isunpacked", i.Name(), imgPlatform, snapshotter)
 					// Update CRI's image cache
 					if err := c.UpdateImage(ctx, i.Name()); err != nil {
 						log.G(ctx).WithError(err).Warnf("Failed to update reference for image %q", i.Name())
