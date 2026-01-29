@@ -106,11 +106,13 @@ func init() {
 
 			allSnapshotters := mdb.Snapshotters()
 			defaultSnapshotter := config.Snapshotter
-			if s, ok := allSnapshotters[defaultSnapshotter]; ok {
-				options.Snapshotters[defaultSnapshotter] = s
-			} else {
+			if _, ok := allSnapshotters[defaultSnapshotter]; !ok {
 				return nil, fmt.Errorf("failed to find snapshotter %q", defaultSnapshotter)
 			}
+			// Use all available snapshotters to support runtime-specific snapshotters
+			// (e.g., nydus configured in OCI runtime config) that may not be in
+			// RuntimePlatforms config.
+			options.Snapshotters = allSnapshotters
 
 			snapshotterExports := func(snapshotter string) map[string]string {
 				if plugin := ic.Plugins().Get(plugins.SnapshotPlugin, snapshotter); plugin != nil {
@@ -130,8 +132,11 @@ func init() {
 				return snapshotRoot
 			}
 
+			// Populate exports for all available snapshotters
+			for name := range allSnapshotters {
+				options.SnapshotterExports[name] = snapshotterExports(name)
+			}
 			options.ImageFSPaths[defaultSnapshotter] = snapshotRoot(defaultSnapshotter)
-			options.SnapshotterExports[defaultSnapshotter] = snapshotterExports(defaultSnapshotter)
 			log.L.Infof("Get image filesystem path %q for snapshotter %q", options.ImageFSPaths[defaultSnapshotter], defaultSnapshotter)
 
 			for runtimeName, rp := range config.RuntimePlatforms {
@@ -143,10 +148,6 @@ func init() {
 				if _, ok := options.ImageFSPaths[snapshotter]; !ok {
 					options.ImageFSPaths[snapshotter] = snapshotRoot(snapshotter)
 					options.SnapshotterExports[snapshotter] = snapshotterExports(snapshotter)
-					// Add runtime-specific snapshotter to the snapshotters map
-					if s, ok := allSnapshotters[snapshotter]; ok {
-						options.Snapshotters[snapshotter] = s
-					}
 					log.L.Infof("Get image filesystem path %q for snapshotter %q", options.ImageFSPaths[snapshotter], snapshotter)
 				}
 
