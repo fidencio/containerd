@@ -208,3 +208,15 @@ func (c *CRIImageService) Config() criconfig.ImageConfig {
 func (c *CRIImageService) GRPCService() runtime.ImageServiceServer {
 	return &GRPCCRIImageService{c}
 }
+
+// IsImageUnpacked checks if an image is unpacked for the given snapshotter.
+// This is used to determine if an image needs to be re-pulled to ensure
+// proper snapshotter-specific metadata is set up (e.g., for remote snapshotters
+// like nydus that need image annotations during pull).
+func (c *CRIImageService) IsImageUnpacked(ctx context.Context, ref string, snapshotter string) (bool, error) {
+	image, err := c.client.GetImage(ctx, ref)
+	if err != nil {
+		return false, err
+	}
+	return image.IsUnpacked(ctx, snapshotter)
+}

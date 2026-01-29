@@ -331,11 +331,36 @@ func (c *Controller) ensureImageExists(ctx context.Context, ref string, config *
 	if err != nil && !errdefs.IsNotFound(err) {
 		return nil, fmt.Errorf("failed to get image %q: %w", ref, err)
 	}
-	if err == nil {
-		return &image, nil
+
+	// Determine the target snapshotter for this runtime
+	targetSnapshotter := c.imageConfig.Snapshotter
+	if runtimeHandler != "" {
+		ociRuntime, err := c.config.GetSandboxRuntime(config, runtimeHandler)
+		if err == nil && ociRuntime.Snapshotter != "" {
+			targetSnapshotter = ociRuntime.Snapshotter
+		}
 	}
-	// Pull image to ensure the image exists
-	// TODO: Cleaner interface
+
+	if err == nil {
+		// Image exists locally. Check if it's unpacked for the target snapshotter.
+		// For remote/proxy snapshotters (like nydus), the image needs to be pulled
+		// through the snapshotter to set up proper metadata and annotations.
+		// If the image was previously pulled with a different snapshotter, it won't
+		// have the necessary metadata for the target snapshotter.
+		unpacked, checkErr := c.imageService.IsImageUnpacked(ctx, ref, targetSnapshotter)
+		if checkErr != nil {
+			log.G(ctx).WithError(checkErr).Debugf("Failed to check if image %q is unpacked for snapshotter %q", ref, targetSnapshotter)
+			// Continue with the existing image if we can't check
+			return &image, nil
+		}
+		if unpacked {
+			return &image, nil
+		}
+		// Image exists but not unpacked for target snapshotter, need to pull
+		log.G(ctx).Infof("Image %q exists but not unpacked for snapshotter %q, pulling to ensure proper metadata", ref, targetSnapshotter)
+	}
+
+	// Pull image to ensure the image exists and is properly prepared for the target snapshotter
 	imageID, err := c.imageService.PullImage(ctx, ref, nil, config, runtimeHandler)
 	if err != nil {
 		return nil, fmt.Errorf("failed to pull image %q: %w", ref, err)
