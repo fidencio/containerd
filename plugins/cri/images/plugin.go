@@ -143,6 +143,10 @@ func init() {
 				if _, ok := options.ImageFSPaths[snapshotter]; !ok {
 					options.ImageFSPaths[snapshotter] = snapshotRoot(snapshotter)
 					options.SnapshotterExports[snapshotter] = snapshotterExports(snapshotter)
+					// Add runtime-specific snapshotter to the snapshotters map
+					if s, ok := allSnapshotters[snapshotter]; ok {
+						options.Snapshotters[snapshotter] = s
+					}
 					log.L.Infof("Get image filesystem path %q for snapshotter %q", options.ImageFSPaths[snapshotter], snapshotter)
 				}
 

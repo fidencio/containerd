@@ -179,22 +179,23 @@ func (c *CRIImageService) LocalResolve(refOrID string, snapshotter ...string) (i
 			sn = snapshotter[0]
 		}
 
-		// For local snapshotters , verify snapshot existence.
-		// For remote snapshotters), we skip the strict check to avoid
-		// breaking lazy loading workflows where snapshots may not be in the cache yet.
-		if !c.snapshotStore.IsRemoteSnapshotter(sn) {
-			if snSvc, ok := c.snapshotStore.GetSnapshotter(sn); ok {
-				ctx := ctrdutil.NamespacedContext()
-				if _, err := snSvc.Stat(ctx, image.ChainID); err != nil {
-					log.L.Debugf("LocalResolve: snapshot %q missing in snapshotter %q: %v. Cleaning up cache and returning NotFound to trigger pull.", image.ChainID, sn, err)
-					// Cleanup the stale snapshot record from the store so that the next PullImage doesn't skip it.
-					key := snapshotstore.Key{
-						Key:         image.ChainID,
-						Snapshotter: sn,
-					}
-					c.snapshotStore.Delete(key)
-					return imagestore.Image{}, err
+		// Verify snapshot existence for the target snapshotter.
+		// For both local and remote snapshotters, if the snapshot doesn't exist,
+		// we trigger a re-pull. This is important for remote/proxy snapshotters
+		// (like nydus) that need to be part of the original pull to set up their
+		// metadata and annotations. If the image was pulled with a different
+		// snapshotter, the remote snapshotter won't have the necessary state.
+		if snSvc, ok := c.snapshotStore.GetSnapshotter(sn); ok {
+			ctx := ctrdutil.NamespacedContext()
+			if _, err := snSvc.Stat(ctx, image.ChainID); err != nil {
+				log.L.Debugf("LocalResolve: snapshot %q missing in snapshotter %q: %v. Cleaning up cache and returning NotFound to trigger pull.", image.ChainID, sn, err)
+				// Cleanup the stale snapshot record from the store so that the next PullImage doesn't skip it.
+				key := snapshotstore.Key{
+					Key:         image.ChainID,
+					Snapshotter: sn,
 				}
+				c.snapshotStore.Delete(key)
+				return imagestore.Image{}, err
 			}
 		}
 	}
