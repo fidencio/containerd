@@ -139,6 +139,25 @@ func NewService(config criconfig.ImageConfig, options *CRIImageServiceOptions) (
 	return &svc, nil
 }
 
+// UpdateRuntimeSnapshotter adds or updates the snapshotter mapping for a runtime.
+// This is called by the main CRI plugin after both image and runtime plugins are initialized,
+// to propagate runtime-specific snapshotters configured in the runtime plugin's config.
+func (c *CRIImageService) UpdateRuntimeSnapshotter(runtimeName, snapshotter string) {
+	if c.runtimePlatforms == nil {
+		c.runtimePlatforms = make(map[string]ImagePlatform)
+	}
+	// Don't override if already configured
+	if _, exists := c.runtimePlatforms[runtimeName]; exists {
+		log.L.Debugf("Runtime %q already has snapshotter configured, not overriding", runtimeName)
+		return
+	}
+	c.runtimePlatforms[runtimeName] = ImagePlatform{
+		Snapshotter: snapshotter,
+		Platform:    platforms.DefaultSpec(),
+	}
+	log.L.Infof("Registered runtime %q with snapshotter %q", runtimeName, snapshotter)
+}
+
 // LocalResolve resolves image reference locally and returns corresponding image metadata. It
 // returns errdefs.ErrNotFound if the reference doesn't exist.
 func (c *CRIImageService) LocalResolve(refOrID string) (imagestore.Image, error) {
@@ -207,4 +226,13 @@ func (c *CRIImageService) Config() criconfig.ImageConfig {
 // GRPCService returns a new CRI Image Service grpc server.
 func (c *CRIImageService) GRPCService() runtime.ImageServiceServer {
 	return &GRPCCRIImageService{c}
+}
+
+// IsImageUnpacked checks if an image is unpacked for the given snapshotter.
+func (c *CRIImageService) IsImageUnpacked(ctx context.Context, ref string, snapshotter string) (bool, error) {
+	image, err := c.client.GetImage(ctx, ref)
+	if err != nil {
+		return false, err
+	}
+	return image.IsUnpacked(ctx, snapshotter)
 }
