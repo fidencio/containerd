@@ -420,6 +420,16 @@ func (u *Unpacker) unpack(
 		}
 		snapshotLabels[labelSnapshotRef] = chainID
 
+		// Ensure layer digest label is always present for remote snapshotters.
+		// When an image is re-unpacked for a different snapshotter, the layer
+		// descriptors may not have annotations (they were set during original
+		// pull via AppendInfoHandlerWrapper). Remote snapshotters like nydus
+		// need the layer digest to identify layers and return ErrAlreadyExists.
+		const targetLayerDigestLabel = "containerd.io/snapshot/cri.layer-digest"
+		if _, ok := snapshotLabels[targetLayerDigestLabel]; !ok {
+			snapshotLabels[targetLayerDigestLabel] = desc.Digest.String()
+		}
+
 		var (
 			key    string
 			mounts []mount.Mount
