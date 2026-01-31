@@ -266,10 +266,23 @@ func (c *CRIImageService) IsImageUnpacked(ctx context.Context, ref string, snaps
 //
 // For remote snapshotters that need metadata labels (like nydus in proxy mode),
 // the required labels are passed to the snapshotter during unpack.
+//
+// If snapshots already exist with incorrect labels (e.g., from a previous unpack
+// with wrong configuration), they are deleted and recreated with the correct labels.
 func (c *CRIImageService) UnpackImage(ctx context.Context, ref string, snapshotter string) error {
+	log.G(ctx).Debugf("FIDENCIO: UnpackImage called for ref=%s, snapshotter=%s", ref, snapshotter)
+
 	image, err := c.client.GetImage(ctx, ref)
 	if err != nil {
+		log.G(ctx).WithError(err).Debugf("FIDENCIO: UnpackImage - GetImage failed for %s", ref)
 		return err
+	}
+
+	// Check if we need to delete existing snapshots with wrong labels
+	// This handles the case where image was previously unpacked for this snapshotter
+	// but with incorrect labels (e.g., digest instead of pullable reference)
+	if err := c.deleteSnapshotsWithWrongLabels(ctx, image, snapshotter, ref); err != nil {
+		log.G(ctx).WithError(err).Warnf("FIDENCIO: Failed to delete snapshots with wrong labels, continuing anyway")
 	}
 
 	// Pass labels required by remote snapshotters.
@@ -280,7 +293,64 @@ func (c *CRIImageService) UnpackImage(ctx context.Context, ref string, snapshott
 		snpkg.TargetRefLabel: ref,
 	}
 
-	return image.Unpack(ctx, snapshotter, containerd.WithUnpackSnapshotOpts(snapshots.WithLabels(labels)))
+	log.G(ctx).Debugf("FIDENCIO: UnpackImage - calling image.Unpack with labels=%v", labels)
+	err = image.Unpack(ctx, snapshotter, containerd.WithUnpackSnapshotOpts(snapshots.WithLabels(labels)))
+	if err != nil {
+		log.G(ctx).WithError(err).Debugf("FIDENCIO: UnpackImage - image.Unpack failed")
+	} else {
+		log.G(ctx).Debugf("FIDENCIO: UnpackImage - image.Unpack succeeded")
+	}
+	return err
+}
+
+// deleteSnapshotsWithWrongLabels removes snapshots that have incorrect labels.
+// This is needed when an image was previously unpacked with wrong metadata
+// (e.g., digest instead of pullable reference) and needs to be re-unpacked.
+func (c *CRIImageService) deleteSnapshotsWithWrongLabels(ctx context.Context, image containerd.Image, snapshotter string, expectedRef string) error {
+	ss := c.client.SnapshotService(snapshotter)
+
+	// Get image layer chain IDs
+	diffIDs, err := image.RootFS(ctx)
+	if err != nil {
+		return err
+	}
+	if len(diffIDs) == 0 {
+		return nil
+	}
+
+	// Check each layer's snapshot
+	var chainIDs []string
+	for i := range diffIDs {
+		chainID := identity.ChainID(diffIDs[:i+1]).String()
+		chainIDs = append(chainIDs, chainID)
+	}
+
+	// Check if any snapshot has wrong labels and needs deletion
+	for _, chainID := range chainIDs {
+		info, err := ss.Stat(ctx, chainID)
+		if err != nil {
+			// Snapshot doesn't exist, that's fine
+			continue
+		}
+
+		// Check if the label value is wrong (digest instead of pullable reference)
+		if labelVal, ok := info.Labels[snpkg.TargetRefLabel]; ok {
+			if strings.HasPrefix(labelVal, "sha256:") && labelVal != expectedRef {
+				log.G(ctx).Infof("FIDENCIO: Snapshot %s has wrong label %s (expected %s), will delete all image snapshots", chainID, labelVal, expectedRef)
+				// Delete all snapshots for this image in reverse order (children first)
+				for i := len(chainIDs) - 1; i >= 0; i-- {
+					if delErr := ss.Remove(ctx, chainIDs[i]); delErr != nil {
+						log.G(ctx).WithError(delErr).Debugf("FIDENCIO: Failed to delete snapshot %s", chainIDs[i])
+					} else {
+						log.G(ctx).Debugf("FIDENCIO: Deleted snapshot %s", chainIDs[i])
+					}
+				}
+				return nil
+			}
+		}
+	}
+
+	return nil
 }
 
 // verifySnapshotLabels checks if the image's snapshots have the required labels

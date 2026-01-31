@@ -188,19 +188,29 @@ func (c *criService) CreateContainer(ctx context.Context, r *runtime.CreateConta
 				log.G(ctx).WithError(err).Warnf("Failed to check if image %q is unpacked for snapshotter %q", imageRef, ociRuntime.Snapshotter)
 			} else if !unpacked {
 				// Image exists but not unpacked for target snapshotter.
+				// Find a pullable reference (not just a digest) for remote snapshotters
+				// that need to know the image source for guest pulling.
+				pullableRef := imageRef
+				for _, ref := range image.References {
+					// Prefer a tag reference over a digest reference
+					if !strings.Contains(ref, "@sha256:") {
+						pullableRef = ref
+						break
+					}
+				}
+				// Fallback to first reference if all are digest-based
+				if pullableRef == imageRef && len(image.References) > 0 {
+					pullableRef = image.References[0]
+				}
+				log.G(ctx).Infof("FIDENCIO: Image %q exists but not unpacked for snapshotter %q, using pullable ref %q", imageRef, ociRuntime.Snapshotter, pullableRef)
+
 				// First try to unpack locally (fast, no registry access).
 				// If that fails (e.g., for remote snapshotters that need special handling),
 				// fall back to PullImage which goes through the snapshotter's prepare flow.
-				log.G(ctx).Infof("Image %q exists but not unpacked for snapshotter %q, unpacking", imageRef, ociRuntime.Snapshotter)
-				if err := c.ImageService.UnpackImage(ctx, imageRef, ociRuntime.Snapshotter); err != nil {
-					log.G(ctx).WithError(err).Infof("Failed to unpack image %q locally for snapshotter %q, falling back to pull", imageRef, ociRuntime.Snapshotter)
-					// Use a pullable reference (not digest) for PullImage
-					pullRef := imageRef
-					if len(image.References) > 0 {
-						pullRef = image.References[0]
-					}
-					if _, err := c.ImageService.PullImage(ctx, pullRef, nil, sandboxConfig, runtimeHandler); err != nil {
-						return nil, fmt.Errorf("failed to pull image %q for snapshotter %q: %w", pullRef, ociRuntime.Snapshotter, err)
+				if err := c.ImageService.UnpackImage(ctx, pullableRef, ociRuntime.Snapshotter); err != nil {
+					log.G(ctx).WithError(err).Infof("FIDENCIO: Failed to unpack image %q locally for snapshotter %q, falling back to pull", pullableRef, ociRuntime.Snapshotter)
+					if _, err := c.ImageService.PullImage(ctx, pullableRef, nil, sandboxConfig, runtimeHandler); err != nil {
+						return nil, fmt.Errorf("failed to pull image %q for snapshotter %q: %w", pullableRef, ociRuntime.Snapshotter, err)
 					}
 				}
 			}
