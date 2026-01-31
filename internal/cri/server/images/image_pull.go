@@ -195,6 +195,31 @@ func (c *CRIImageService) PullImage(ctx context.Context, name string, credential
 		// If we can't get the image or config, fall through to pull
 	} else {
 		log.G(ctx).Debugf("FIDENCIO: Image %s NOT properly unpacked for snapshotter %s (unpacked=%v, err=%v), will pull", ref, snapshotter, unpacked, err)
+
+		// If ref is a digest (sha256:...), we need to find a pullable reference.
+		// Registry pull requires a full reference like docker.io/library/nginx:latest,
+		// not just sha256:abc123...
+		if strings.HasPrefix(ref, "sha256:") {
+			log.G(ctx).Debugf("FIDENCIO: ref %s is a digest, looking up pullable reference", ref)
+			// Try to get the image metadata from our store using the digest as image ID
+			if img, err := c.imageStore.Get(ref); err == nil && len(img.References) > 0 {
+				// Find a pullable reference (prefer one that's not a digest)
+				for _, imgRef := range img.References {
+					if !strings.Contains(imgRef, "@sha256:") {
+						log.G(ctx).Infof("FIDENCIO: Using pullable reference %s instead of digest %s", imgRef, ref)
+						ref = imgRef
+						break
+					}
+				}
+				// If all references are digest-based, just use the first one
+				if strings.HasPrefix(ref, "sha256:") && len(img.References) > 0 {
+					ref = img.References[0]
+					log.G(ctx).Infof("FIDENCIO: Using reference %s (digest-based) for pull", ref)
+				}
+			} else {
+				log.G(ctx).Warnf("FIDENCIO: Could not find pullable reference for digest %s: %v", ref, err)
+			}
+		}
 	}
 
 	span.SetAttributes(
