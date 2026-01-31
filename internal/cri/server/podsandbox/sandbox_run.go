@@ -363,14 +363,12 @@ func (c *Controller) ensureImageExists(ctx context.Context, ref string, config *
 	}
 	// Pull image to ensure the image exists and is properly prepared for the target snapshotter.
 	// PullImage will look up the snapshotter from runtimePlatforms based on runtimeHandler.
-	// TODO: Cleaner interface
 	imageID, err := c.imageService.PullImage(ctx, ref, nil, config, runtimeHandler)
 	if err != nil {
 		return nil, fmt.Errorf("failed to pull image %q: %w", ref, err)
 	}
 	newImage, err := c.imageService.GetImage(imageID)
 	if err != nil {
-		// It's still possible that someone removed the image right after it is pulled.
 		return nil, fmt.Errorf("failed to get image %q after pulling: %w", imageID, err)
 	}
 	return &newImage, nil

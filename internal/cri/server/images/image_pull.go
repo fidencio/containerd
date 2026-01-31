@@ -191,6 +191,21 @@ func (c *CRIImageService) PullImage(ctx context.Context, name string, credential
 		return "", err
 	}
 
+	// If a runtime-specific snapshotter was requested, ensure the image is
+	// unpacked for that snapshotter. This handles the case where an image
+	// was previously pulled with a different snapshotter.
+	if runtimeHandler != "" && snapshotter != c.config.Snapshotter {
+		unpacked, err := image.IsUnpacked(ctx, snapshotter)
+		if err != nil {
+			log.G(ctx).WithError(err).Warnf("Failed to check if image %q is unpacked for snapshotter %q", ref, snapshotter)
+		} else if !unpacked {
+			log.G(ctx).Infof("Image %q not unpacked for runtime snapshotter %q, unpacking", ref, snapshotter)
+			if err := image.Unpack(ctx, snapshotter); err != nil {
+				return "", fmt.Errorf("failed to unpack image %q for snapshotter %q: %w", ref, snapshotter, err)
+			}
+		}
+	}
+
 	span.AddEvent("Pull and unpack image complete")
 
 	configDesc, err := image.Config(ctx)
