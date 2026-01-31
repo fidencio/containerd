@@ -25,6 +25,7 @@ import (
 	"github.com/containerd/containerd/v2/core/images"
 	"github.com/containerd/containerd/v2/core/snapshots"
 	"github.com/containerd/containerd/v2/core/transfer"
+	snpkg "github.com/containerd/containerd/v2/pkg/snapshotters"
 	criconfig "github.com/containerd/containerd/v2/internal/cri/config"
 	imagestore "github.com/containerd/containerd/v2/internal/cri/store/image"
 	snapshotstore "github.com/containerd/containerd/v2/internal/cri/store/snapshot"
@@ -222,10 +223,22 @@ func (c *CRIImageService) IsImageUnpacked(ctx context.Context, ref string, snaps
 // This is used when an image exists locally but needs to be unpacked for a different
 // snapshotter (e.g., for remote/proxy snapshotters like nydus).
 // Unlike PullImage, this does not contact the registry.
+//
+// For remote snapshotters that need metadata labels (like nydus in proxy mode),
+// the required labels are passed to the snapshotter during unpack.
 func (c *CRIImageService) UnpackImage(ctx context.Context, ref string, snapshotter string) error {
 	image, err := c.client.GetImage(ctx, ref)
 	if err != nil {
 		return err
 	}
-	return image.Unpack(ctx, snapshotter)
+
+	// Pass labels required by remote snapshotters.
+	// These labels are normally set during PullImage via AppendInfoHandlerWrapper,
+	// but when unpacking an existing image for a different snapshotter, we need
+	// to pass them explicitly.
+	labels := map[string]string{
+		snpkg.TargetRefLabel: ref,
+	}
+
+	return image.Unpack(ctx, snapshotter, containerd.WithUnpackSnapshotOpts(snapshots.WithLabels(labels)))
 }
