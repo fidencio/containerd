@@ -278,11 +278,11 @@ func (c *CRIImageService) UnpackImage(ctx context.Context, ref string, snapshott
 		return err
 	}
 
-	// Check if we need to delete existing snapshots with wrong labels
+	// Fix existing snapshot labels if they have wrong values
 	// This handles the case where image was previously unpacked for this snapshotter
 	// but with incorrect labels (e.g., digest instead of pullable reference)
-	if err := c.deleteSnapshotsWithWrongLabels(ctx, image, snapshotter, ref); err != nil {
-		log.G(ctx).WithError(err).Warnf("FIDENCIO: Failed to delete snapshots with wrong labels, continuing anyway")
+	if err := c.fixSnapshotLabels(ctx, image, snapshotter, ref); err != nil {
+		log.G(ctx).WithError(err).Warnf("FIDENCIO: Failed to fix snapshot labels, continuing anyway")
 	}
 
 	// Pass labels required by remote snapshotters.
@@ -303,10 +303,11 @@ func (c *CRIImageService) UnpackImage(ctx context.Context, ref string, snapshott
 	return err
 }
 
-// deleteSnapshotsWithWrongLabels removes snapshots that have incorrect labels.
+// fixSnapshotLabels updates snapshot labels if they have incorrect values.
 // This is needed when an image was previously unpacked with wrong metadata
-// (e.g., digest instead of pullable reference) and needs to be re-unpacked.
-func (c *CRIImageService) deleteSnapshotsWithWrongLabels(ctx context.Context, image containerd.Image, snapshotter string, expectedRef string) error {
+// (e.g., digest instead of pullable reference) and needs the correct label
+// for remote snapshotters like nydus.
+func (c *CRIImageService) fixSnapshotLabels(ctx context.Context, image containerd.Image, snapshotter string, expectedRef string) error {
 	ss := c.client.SnapshotService(snapshotter)
 
 	// Get image layer chain IDs
@@ -318,15 +319,10 @@ func (c *CRIImageService) deleteSnapshotsWithWrongLabels(ctx context.Context, im
 		return nil
 	}
 
-	// Check each layer's snapshot
-	var chainIDs []string
+	// Check and fix each layer's snapshot labels
 	for i := range diffIDs {
 		chainID := identity.ChainID(diffIDs[:i+1]).String()
-		chainIDs = append(chainIDs, chainID)
-	}
 
-	// Check if any snapshot has wrong labels and needs deletion
-	for _, chainID := range chainIDs {
 		info, err := ss.Stat(ctx, chainID)
 		if err != nil {
 			// Snapshot doesn't exist, that's fine
@@ -336,16 +332,26 @@ func (c *CRIImageService) deleteSnapshotsWithWrongLabels(ctx context.Context, im
 		// Check if the label value is wrong (digest instead of pullable reference)
 		if labelVal, ok := info.Labels[snpkg.TargetRefLabel]; ok {
 			if strings.HasPrefix(labelVal, "sha256:") && labelVal != expectedRef {
-				log.G(ctx).Infof("FIDENCIO: Snapshot %s has wrong label %s (expected %s), will delete all image snapshots", chainID, labelVal, expectedRef)
-				// Delete all snapshots for this image in reverse order (children first)
-				for i := len(chainIDs) - 1; i >= 0; i-- {
-					if delErr := ss.Remove(ctx, chainIDs[i]); delErr != nil {
-						log.G(ctx).WithError(delErr).Debugf("FIDENCIO: Failed to delete snapshot %s", chainIDs[i])
-					} else {
-						log.G(ctx).Debugf("FIDENCIO: Deleted snapshot %s", chainIDs[i])
-					}
+				log.G(ctx).Infof("FIDENCIO: Snapshot %s has wrong label %s, updating to %s", chainID, labelVal, expectedRef)
+				// Update the label with the correct value
+				info.Labels[snpkg.TargetRefLabel] = expectedRef
+				if _, err := ss.Update(ctx, info, "labels."+snpkg.TargetRefLabel); err != nil {
+					log.G(ctx).WithError(err).Warnf("FIDENCIO: Failed to update label on snapshot %s", chainID)
+				} else {
+					log.G(ctx).Debugf("FIDENCIO: Updated label on snapshot %s", chainID)
 				}
-				return nil
+			}
+		} else {
+			// Label doesn't exist, add it
+			log.G(ctx).Infof("FIDENCIO: Snapshot %s missing label, adding %s", chainID, expectedRef)
+			if info.Labels == nil {
+				info.Labels = make(map[string]string)
+			}
+			info.Labels[snpkg.TargetRefLabel] = expectedRef
+			if _, err := ss.Update(ctx, info, "labels."+snpkg.TargetRefLabel); err != nil {
+				log.G(ctx).WithError(err).Warnf("FIDENCIO: Failed to add label to snapshot %s", chainID)
+			} else {
+				log.G(ctx).Debugf("FIDENCIO: Added label to snapshot %s", chainID)
 			}
 		}
 	}
