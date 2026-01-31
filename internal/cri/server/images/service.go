@@ -18,6 +18,7 @@ package images
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	containerd "github.com/containerd/containerd/v2/client"
@@ -36,6 +37,7 @@ import (
 
 	docker "github.com/distribution/reference"
 	imagedigest "github.com/opencontainers/go-digest"
+	"github.com/opencontainers/image-spec/identity"
 	imagespec "github.com/opencontainers/image-spec/specs-go/v1"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1"
 )
@@ -44,6 +46,7 @@ type imageClient interface {
 	ListImages(context.Context, ...string) ([]containerd.Image, error)
 	GetImage(context.Context, string) (containerd.Image, error)
 	Pull(context.Context, string, ...containerd.RemoteOpt) (containerd.Image, error)
+	SnapshotService(snapshotterName string) snapshots.Snapshotter
 }
 
 type ImagePlatform struct {
@@ -70,6 +73,8 @@ type CRIImageService struct {
 	imageStore *imagestore.Store
 	// snapshotStore stores information of all snapshots.
 	snapshotStore *snapshotstore.Store
+	// snapshotters provides access to snapshotter instances.
+	snapshotters map[string]snapshots.Snapshotter
 	// transferrer is used to pull image with transfer service
 	transferrer transfer.Transferrer
 	// unpackDuplicationSuppressor is used to make sure that there is only
@@ -124,6 +129,7 @@ func NewService(config criconfig.ImageConfig, options *CRIImageServiceOptions) (
 		imageFSPaths:                options.ImageFSPaths,
 		runtimePlatforms:            options.RuntimePlatforms,
 		snapshotStore:               snapshotstore.NewStore(),
+		snapshotters:                options.Snapshotters,
 		transferrer:                 options.Transferrer,
 		unpackDuplicationSuppressor: kmutex.New(),
 		downloadLimiter:             downloadLimiter,
@@ -211,12 +217,46 @@ func (c *CRIImageService) GRPCService() runtime.ImageServiceServer {
 }
 
 // IsImageUnpacked checks if an image is unpacked for the given snapshotter.
+// When using a runtime-specific snapshotter (different from the default),
+// this also verifies that the required labels are present on the snapshots.
+// If labels are missing (e.g., from images pulled before the label fix),
+// returns false to trigger a re-pull with proper labels.
 func (c *CRIImageService) IsImageUnpacked(ctx context.Context, ref string, snapshotter string) (bool, error) {
+	log.G(ctx).Debugf("FIDENCIO: IsImageUnpacked called for %s with snapshotter %s", ref, snapshotter)
+
 	image, err := c.client.GetImage(ctx, ref)
 	if err != nil {
+		log.G(ctx).Debugf("FIDENCIO: IsImageUnpacked - GetImage failed for %s: %v", ref, err)
 		return false, err
 	}
-	return image.IsUnpacked(ctx, snapshotter)
+
+	unpacked, err := image.IsUnpacked(ctx, snapshotter)
+	if err != nil || !unpacked {
+		log.G(ctx).Debugf("FIDENCIO: IsImageUnpacked - image.IsUnpacked returned unpacked=%v, err=%v", unpacked, err)
+		return unpacked, err
+	}
+
+	// When using a runtime-specific snapshotter (not the default),
+	// verify that snapshots have required labels. This ensures that images
+	// pulled before the runtime-snapshotter fix get re-pulled with proper labels.
+	defaultSnapshotter := c.config.Snapshotter
+	log.G(ctx).Debugf("FIDENCIO: IsImageUnpacked - snapshotter=%s, defaultSnapshotter=%s", snapshotter, defaultSnapshotter)
+	if snapshotter != defaultSnapshotter {
+		hasLabels, err := c.verifySnapshotLabels(ctx, image, snapshotter)
+		log.G(ctx).Debugf("FIDENCIO: IsImageUnpacked - verifySnapshotLabels returned hasLabels=%v, err=%v", hasLabels, err)
+		if err != nil {
+			log.G(ctx).WithError(err).Warnf("Failed to verify snapshot labels for %s", ref)
+			// If we can't verify, assume it's OK to avoid breaking existing setups
+			return true, nil
+		}
+		if !hasLabels {
+			log.G(ctx).Infof("FIDENCIO: Image %s is unpacked for %s but missing required labels, needs re-pull", ref, snapshotter)
+			return false, nil
+		}
+	}
+
+	log.G(ctx).Debugf("FIDENCIO: IsImageUnpacked - returning true for %s", ref)
+	return true, nil
 }
 
 // UnpackImage unpacks an existing image into the specified snapshotter.
@@ -241,4 +281,52 @@ func (c *CRIImageService) UnpackImage(ctx context.Context, ref string, snapshott
 	}
 
 	return image.Unpack(ctx, snapshotter, containerd.WithUnpackSnapshotOpts(snapshots.WithLabels(labels)))
+}
+
+// verifySnapshotLabels checks if the image's snapshots have the required labels
+// for runtime-specific snapshotters.
+func (c *CRIImageService) verifySnapshotLabels(ctx context.Context, image containerd.Image, snapshotter string) (bool, error) {
+	log.G(ctx).Debugf("FIDENCIO: verifySnapshotLabels called for snapshotter=%s", snapshotter)
+
+	// Get the snapshotter via the client (handles proxy/remote snapshotters)
+	ss := c.client.SnapshotService(snapshotter)
+
+	// Get the image's root filesystem descriptor to find the top layer
+	diffIDs, err := image.RootFS(ctx)
+	if err != nil {
+		log.G(ctx).Debugf("FIDENCIO: verifySnapshotLabels - RootFS failed: %v", err)
+		return false, err
+	}
+	if len(diffIDs) == 0 {
+		log.G(ctx).Debugf("FIDENCIO: verifySnapshotLabels - no layers, returning true")
+		return true, nil // No layers, nothing to check
+	}
+
+	// The snapshot key for the top layer is the ChainID
+	chainID := identity.ChainID(diffIDs).String()
+
+	// Check if the snapshot has the TargetRefLabel
+	info, err := ss.Stat(ctx, chainID)
+	if err != nil {
+		// Snapshot doesn't exist or other error
+		log.G(ctx).Debugf("FIDENCIO: verifySnapshotLabels - Stat(%s) failed: %v", chainID, err)
+		return false, err
+	}
+
+	log.G(ctx).Debugf("FIDENCIO: verifySnapshotLabels - chainID=%s, labels=%v", chainID, info.Labels)
+
+	// Check for the required label with a pullable reference (not just a digest)
+	if ref, ok := info.Labels[snpkg.TargetRefLabel]; ok {
+		// A pullable reference should NOT start with "sha256:" - that's just a digest
+		// and can't be used by remote snapshotters to pull the image
+		if !strings.HasPrefix(ref, "sha256:") {
+			log.G(ctx).Debugf("FIDENCIO: verifySnapshotLabels - found pullable TargetRefLabel: %s", ref)
+			return true, nil
+		}
+		log.G(ctx).Debugf("FIDENCIO: verifySnapshotLabels - TargetRefLabel is a digest, not pullable: %s", ref)
+	} else {
+		log.G(ctx).Debugf("FIDENCIO: verifySnapshotLabels - TargetRefLabel NOT found")
+	}
+
+	return false, nil
 }

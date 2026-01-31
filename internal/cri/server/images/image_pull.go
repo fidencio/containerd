@@ -170,6 +170,33 @@ func (c *CRIImageService) PullImage(ctx context.Context, name string, credential
 		return "", err
 	}
 
+	// Check if the image is already properly unpacked for this snapshotter.
+	// If the image exists but is missing required labels (e.g., pulled before
+	// the runtime-snapshotter fix), we need to force a full pull to get proper labels.
+	log.G(ctx).Debugf("FIDENCIO: PullImage checking IsImageUnpacked for %s with snapshotter %s", ref, snapshotter)
+	if unpacked, err := c.IsImageUnpacked(ctx, ref, snapshotter); err == nil && unpacked {
+		log.G(ctx).Debugf("FIDENCIO: Image %s already unpacked for snapshotter %s with proper labels, skipping pull", ref, snapshotter)
+		// Image is ready, just return it
+		existingImage, err := c.client.GetImage(ctx, ref)
+		if err == nil {
+			// Get the config descriptor to return the correct imageID (config digest)
+			configDesc, err := existingImage.Config(ctx)
+			if err == nil {
+				imageID := configDesc.Digest.String()
+				// Update image store and return
+				if err := c.UpdateImage(ctx, ref); err != nil {
+					log.G(ctx).WithError(err).Warnf("Failed to update image store for %s", ref)
+				}
+				log.G(ctx).Debugf("FIDENCIO: Returning existing image %s with imageID %s", ref, imageID)
+				return imageID, nil
+			}
+			log.G(ctx).WithError(err).Debugf("FIDENCIO: Failed to get config for %s, falling through to pull", ref)
+		}
+		// If we can't get the image or config, fall through to pull
+	} else {
+		log.G(ctx).Debugf("FIDENCIO: Image %s NOT properly unpacked for snapshotter %s (unpacked=%v, err=%v), will pull", ref, snapshotter, unpacked, err)
+	}
+
 	span.SetAttributes(
 		tracing.Attribute("image.ref", ref),
 		tracing.Attribute("snapshotter.name", snapshotter),
