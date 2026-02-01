@@ -170,6 +170,47 @@ func (c *CRIImageService) PullImage(ctx context.Context, name string, credential
 		return "", err
 	}
 
+	// Check if the image is already properly unpacked for this snapshotter.
+	// If the image exists but is missing required labels (e.g., pulled before
+	// the runtime-snapshotter fix), we need to force a full pull to get proper labels.
+	if unpacked, err := c.IsImageUnpacked(ctx, ref, snapshotter); err == nil && unpacked {
+		// Image is ready, just return it
+		existingImage, err := c.client.GetImage(ctx, ref)
+		if err == nil {
+			// Get the config descriptor to return the correct imageID (config digest)
+			configDesc, err := existingImage.Config(ctx)
+			if err == nil {
+				imageID := configDesc.Digest.String()
+				// Update image store and return
+				if err := c.UpdateImage(ctx, ref); err != nil {
+					log.G(ctx).WithError(err).Warnf("Failed to update image store for %s", ref)
+				}
+				return imageID, nil
+			}
+		}
+		// If we can't get the image or config, fall through to pull
+	}
+
+	// If ref is a digest (sha256:...), we need to find a pullable reference.
+	// Registry pull requires a full reference like docker.io/library/nginx:latest,
+	// not just sha256:abc123...
+	if strings.HasPrefix(ref, "sha256:") {
+		// Try to get the image metadata from our store using the digest as image ID
+		if img, err := c.imageStore.Get(ref); err == nil && len(img.References) > 0 {
+			// Find a pullable reference (prefer one that's not a digest)
+			for _, imgRef := range img.References {
+				if !strings.Contains(imgRef, "@sha256:") {
+					ref = imgRef
+					break
+				}
+			}
+			// If all references are digest-based, just use the first one
+			if strings.HasPrefix(ref, "sha256:") && len(img.References) > 0 {
+				ref = img.References[0]
+			}
+		}
+	}
+
 	span.SetAttributes(
 		tracing.Attribute("image.ref", ref),
 		tracing.Attribute("snapshotter.name", snapshotter),
