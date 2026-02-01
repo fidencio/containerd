@@ -113,6 +113,10 @@ type ImageService interface {
 	Config() criconfig.ImageConfig
 
 	UpdateRuntimeSnapshotter(runtimeName string, imagePlatform images.ImagePlatform)
+
+	IsImageUnpackedForSnapshotter(ctx context.Context, ref string, snapshotter string) (bool, error)
+
+	UnpackImage(ctx context.Context, ref string, snapshotter string) error
 }
 
 // criService implements CRIService.
