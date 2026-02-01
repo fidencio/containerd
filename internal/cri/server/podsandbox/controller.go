@@ -116,6 +116,8 @@ type ImageService interface {
 	PullImage(ctx context.Context, name string, creds func(string) (string, string, error), sc *runtime.PodSandboxConfig, runtimeHandler string) (string, error)
 	// IsImageUnpacked checks if an image is unpacked for the given snapshotter.
 	IsImageUnpacked(ctx context.Context, ref string, snapshotter string) (bool, error)
+	// UnpackImage unpacks an existing image into the specified snapshotter.
+	UnpackImage(ctx context.Context, ref string, snapshotter string) error
 }
 
 type Controller struct {

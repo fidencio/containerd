@@ -170,6 +170,39 @@ func (c *CRIImageService) PullImage(ctx context.Context, name string, credential
 		return "", err
 	}
 
+	// Check if the image is already properly unpacked for this snapshotter.
+	// If so, skip the pull to avoid "already exists" errors on retries.
+	if unpacked, err := c.IsImageUnpacked(ctx, ref, snapshotter); err == nil && unpacked {
+		existingImage, err := c.client.GetImage(ctx, ref)
+		if err == nil {
+			configDesc, err := existingImage.Config(ctx)
+			if err == nil {
+				imageID := configDesc.Digest.String()
+				if err := c.UpdateImage(ctx, ref); err != nil {
+					log.G(ctx).WithError(err).Warnf("Failed to update image store for %s", ref)
+				}
+				log.G(ctx).Infof("Image %s already unpacked for snapshotter %s, skipping pull", ref, snapshotter)
+				return imageID, nil
+			}
+		}
+	}
+
+	// If ref is a digest (sha256:...), find a pullable reference.
+	if strings.HasPrefix(ref, "sha256:") {
+		if img, err := c.imageStore.Get(ref); err == nil && len(img.References) > 0 {
+			for _, imgRef := range img.References {
+				if !strings.Contains(imgRef, "@sha256:") {
+					log.G(ctx).Infof("Using pullable reference %s instead of digest %s", imgRef, ref)
+					ref = imgRef
+					break
+				}
+			}
+			if strings.HasPrefix(ref, "sha256:") && len(img.References) > 0 {
+				ref = img.References[0]
+			}
+		}
+	}
+
 	span.SetAttributes(
 		tracing.Attribute("image.ref", ref),
 		tracing.Attribute("snapshotter.name", snapshotter),

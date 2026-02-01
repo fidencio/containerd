@@ -187,11 +187,24 @@ func (c *criService) CreateContainer(ctx context.Context, r *runtime.CreateConta
 			if err != nil {
 				log.G(ctx).WithError(err).Warnf("Failed to check if image %q is unpacked for snapshotter %q", imageRef, ociRuntime.Snapshotter)
 			} else if !unpacked {
-				// Image exists but not unpacked for target snapshotter - unpack it locally
-				// without contacting the registry.
-				log.G(ctx).Infof("Image %q exists but not unpacked for snapshotter %q, unpacking", imageRef, ociRuntime.Snapshotter)
-				if err := c.ImageService.UnpackImage(ctx, imageRef, ociRuntime.Snapshotter); err != nil {
-					return nil, fmt.Errorf("failed to unpack image %q for snapshotter %q: %w", imageRef, ociRuntime.Snapshotter, err)
+				// Image exists but not unpacked for target snapshotter.
+				// Find a pullable reference (not just a digest) for remote snapshotters
+				// that need to know the image source for guest pulling.
+				pullableRef := imageRef
+				for _, ref := range image.References {
+					// Prefer a tag reference over a digest reference
+					if !strings.Contains(ref, "@sha256:") {
+						pullableRef = ref
+						break
+					}
+				}
+				// Fallback to first reference if all are digest-based
+				if pullableRef == imageRef && len(image.References) > 0 {
+					pullableRef = image.References[0]
+				}
+				log.G(ctx).Infof("Image %q exists but not unpacked for snapshotter %q, unpacking with ref %q", imageRef, ociRuntime.Snapshotter, pullableRef)
+				if err := c.ImageService.UnpackImage(ctx, pullableRef, ociRuntime.Snapshotter); err != nil {
+					return nil, fmt.Errorf("failed to unpack image %q for snapshotter %q: %w", pullableRef, ociRuntime.Snapshotter, err)
 				}
 			}
 		}

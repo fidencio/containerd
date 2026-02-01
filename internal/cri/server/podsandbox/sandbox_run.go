@@ -357,12 +357,17 @@ func (c *Controller) ensureImageExists(ctx context.Context, ref string, config *
 		} else if unpacked {
 			return &image, nil
 		} else {
-			// Image exists but not unpacked for target snapshotter, need to pull
-			log.G(ctx).Infof("Image %q exists but not unpacked for snapshotter %q, pulling to ensure proper metadata", ref, targetSnapshotter)
+			// Image exists but not unpacked for target snapshotter.
+			// Use UnpackImage instead of PullImage to avoid "already exists" errors
+			// when snapshots were partially created from a previous failed attempt.
+			log.G(ctx).Infof("Image %q exists but not unpacked for snapshotter %q, unpacking locally", ref, targetSnapshotter)
+			if err := c.imageService.UnpackImage(ctx, ref, targetSnapshotter); err != nil {
+				return nil, fmt.Errorf("failed to unpack image %q for snapshotter %q: %w", ref, targetSnapshotter, err)
+			}
+			return &image, nil
 		}
 	}
-	// Pull image to ensure the image exists and is properly prepared for the target snapshotter.
-	// PullImage will look up the snapshotter from runtimePlatforms based on runtimeHandler.
+	// Pull image since it doesn't exist locally.
 	// TODO: Cleaner interface
 	imageID, err := c.imageService.PullImage(ctx, ref, nil, config, runtimeHandler)
 	if err != nil {
