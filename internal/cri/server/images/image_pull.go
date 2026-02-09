@@ -170,28 +170,17 @@ func (c *CRIImageService) PullImage(ctx context.Context, name string, credential
 		return "", err
 	}
 
-	// Check if the image is already properly unpacked for this snapshotter.
-	// If the image exists but is missing required labels (e.g., pulled before
-	// the runtime-snapshotter fix), we need to force a full pull to get proper labels.
-	if unpacked, err := c.IsImageUnpackedForSnapshotter(ctx, ref, snapshotter); err == nil && unpacked {
-		// Image is ready, just return it
-		existingImage, err := c.client.GetImage(ctx, ref)
-		if err == nil {
-			// Get the config descriptor to return the correct imageID (config digest)
-			configDesc, err := existingImage.Config(ctx)
-			if err == nil {
-				imageID := configDesc.Digest.String()
-				// Ensure image has proper labels and update image store
-				if err := c.ensureImageLabels(ctx, existingImage, ref); err != nil {
-					log.G(ctx).WithError(err).Warnf("Failed to ensure image labels for %s", ref)
-				}
-				if err := c.imageStore.Update(ctx, ref); err != nil {
-					log.G(ctx).WithError(err).Warnf("Failed to update image store for %s", ref)
-				}
-				return imageID, nil
-			}
+	// Check if image is already properly unpacked for this snapshotter
+	imageID, existingImage, err := c.imageForSnapshotter(ctx, ref, snapshotter)
+	if err == nil {
+		// Ensure image has proper labels and update image store
+		if err := c.ensureImageLabels(ctx, existingImage, ref); err != nil {
+			log.G(ctx).WithError(err).Warnf("Failed to ensure image labels for %s", ref)
 		}
-		// If we can't get the image or config, fall through to pull
+		if err := c.imageStore.Update(ctx, ref); err != nil {
+			log.G(ctx).WithError(err).Warnf("Failed to update image store for %s", ref)
+		}
+		return imageID, nil
 	}
 
 	// If ref is a digest (sha256:...), we need to find a pullable reference.
@@ -238,7 +227,7 @@ func (c *CRIImageService) PullImage(ctx context.Context, name string, credential
 	if err != nil {
 		return "", fmt.Errorf("get image config descriptor: %w", err)
 	}
-	imageID := configDesc.Digest.String()
+	imageID = configDesc.Digest.String()
 
 	repoDigest, repoTag := util.GetRepoDigestAndTag(namedRef, image.Target().Digest)
 	for _, r := range []string{imageID, repoTag, repoDigest} {
@@ -381,6 +370,35 @@ func (c *CRIImageService) pullImageWithTransferService(
 		return nil, fmt.Errorf("failed to pull and unpack image %q: %w", ref, err)
 	}
 	return image, nil
+}
+
+// imageForSnapshotter checks if an image is already properly unpacked for the given
+// snapshotter and returns its ID and the image object if so.
+// Returns the image ID and image on success, or an error if a pull is needed.
+func (c *CRIImageService) imageForSnapshotter(ctx context.Context, ref, snapshotter string) (string, containerd.Image, error) {
+	unpacked, err := c.IsImageUnpackedForSnapshotter(ctx, ref, snapshotter)
+	if err != nil {
+		return "", nil, err
+	}
+
+	if !unpacked {
+		return "", nil, fmt.Errorf("image exists but not unpacked for snapshotter %q: %w", snapshotter, errdefs.ErrFailedPrecondition)
+	}
+
+	// Image is ready - get its ID
+	existingImage, err := c.client.GetImage(ctx, ref)
+	if err != nil {
+		return "", nil, err
+	}
+
+	configDesc, err := existingImage.Config(ctx)
+	if err != nil {
+		return "", nil, err
+	}
+
+	imageID := configDesc.Digest.String()
+
+	return imageID, existingImage, nil
 }
 
 // ParseAuth parses AuthConfig and returns username and password/secret required by containerd.
