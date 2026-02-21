@@ -403,14 +403,12 @@ func (c *criService) ensurePauseImageExists(ctx context.Context, config *runtime
 		ref = img
 	}
 
-	_, err := c.ImageService.LocalResolve(ref)
-	if err == nil {
-		return nil
-	} else if !errdefs.IsNotFound(err) {
-		return fmt.Errorf("failed to get image %q: %w", ref, err)
-	}
-
-	_, err = c.ImageService.PullImage(ctx, ref, nil, config, runtimeHandler)
+	// Always go through PullImage which checks if the image is already
+	// properly unpacked for the target snapshotter and returns early if so.
+	// This handles cases where image metadata exists but content was
+	// garbage collected, or where the image needs to be re-unpacked for
+	// a different snapshotter.
+	_, err := c.ImageService.PullImage(ctx, ref, nil, config, runtimeHandler)
 	if err != nil {
 		return fmt.Errorf("failed to pull image %q: %w", ref, err)
 	}
