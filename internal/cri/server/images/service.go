@@ -46,6 +46,7 @@ type imageClient interface {
 	GetImage(context.Context, string) (containerd.Image, error)
 	Pull(context.Context, string, ...containerd.RemoteOpt) (containerd.Image, error)
 	SnapshotService(snapshotterName string) snapshots.Snapshotter
+	ContentStore() content.Store
 }
 
 type ImagePlatform struct {

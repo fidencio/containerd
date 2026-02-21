@@ -375,6 +375,15 @@ func (c *CRIImageService) pullImageWithTransferService(
 // imageForSnapshotter checks if an image is already properly unpacked for the given
 // snapshotter and returns its ID and the image object if so.
 // Returns the image ID and image on success, or an error if a pull is needed.
+//
+// Because ensurePauseImageExists (the CRI-level HACK that pre-pulls the sandbox
+// image before handing off to the controller) cannot guarantee the controller
+// will use the same image object it validated, we must verify that the image
+// content is actually present in the content store - not just that snapshot and
+// image metadata exist. This handles the case where content blobs were garbage
+// collected but image/snapshot metadata remained, which would otherwise cause
+// the controller's c.client.GetImage() + WithNewSnapshot to fail with a
+// content-not-found error at container creation time.
 func (c *CRIImageService) imageForSnapshotter(ctx context.Context, ref, snapshotter string) (string, containerd.Image, error) {
 	unpacked, err := c.IsImageUnpackedForSnapshotter(ctx, ref, snapshotter)
 	if err != nil {
@@ -385,10 +394,23 @@ func (c *CRIImageService) imageForSnapshotter(ctx context.Context, ref, snapshot
 		return "", nil, fmt.Errorf("image exists but not unpacked for snapshotter %q: %w", snapshotter, errdefs.ErrFailedPrecondition)
 	}
 
-	// Image is ready - get its ID
 	existingImage, err := c.client.GetImage(ctx, ref)
 	if err != nil {
 		return "", nil, err
+	}
+
+	// Verify layer content blobs are present. This is a metadata-only check
+	// (cs.Info does not read blob data) so it is cheap. If any layer is missing,
+	// treat it as a failed precondition so the caller forces a fresh pull.
+	cs := c.client.ContentStore()
+	manifest, err := containerdimages.Manifest(ctx, cs, existingImage.Target(), platforms.DefaultStrict())
+	if err != nil {
+		return "", nil, fmt.Errorf("image %q manifest unavailable: %w: %w", ref, err, errdefs.ErrFailedPrecondition)
+	}
+	for _, layer := range manifest.Layers {
+		if _, err := cs.Info(ctx, layer.Digest); err != nil {
+			return "", nil, fmt.Errorf("image %q layer %s unavailable: %w: %w", ref, layer.Digest, err, errdefs.ErrFailedPrecondition)
+		}
 	}
 
 	configDesc, err := existingImage.Config(ctx)
