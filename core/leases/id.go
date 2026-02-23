@@ -23,13 +23,20 @@ import (
 	"time"
 )
 
+// RandomID returns a random unique string. The format is compatible with
+// snapshot extraction keys and other places that need a short unique identifier.
+// Used by WithRandomID and by pkg/rootfs for UnpackKeyFormat.
+func RandomID() string {
+	t := time.Now()
+	var b [3]byte
+	rand.Read(b[:])
+	return fmt.Sprintf("%d-%s", t.Nanosecond(), base64.URLEncoding.EncodeToString(b[:]))
+}
+
 // WithRandomID sets the lease ID to a random unique value
 func WithRandomID() Opt {
 	return func(l *Lease) error {
-		t := time.Now()
-		var b [3]byte
-		rand.Read(b[:])
-		l.ID = fmt.Sprintf("%d-%s", t.Nanosecond(), base64.URLEncoding.EncodeToString(b[:]))
+		l.ID = RandomID()
 		return nil
 	}
 }
